@@ -26,7 +26,7 @@ if not API_KEY:
 AUDIO_SAMPLE_RATE = 24000
 AUDIO_FORMAT = pyaudio.paInt16
 AUDIO_CHANNELS = 1
-AUDIO_BUFFER_SIZE = 1024
+AUDIO_BUFFER_SIZE = 2048
 
 # 全局变量
 audio_chunks = []
@@ -42,23 +42,26 @@ first_audio_logged = False
 
 def audio_callback(audio_bytes: bytes):
     """TTS音频回调函数：实时播放并缓存音频数据"""
+    print(f"DEBUG: Audio callback triggered with {len(audio_bytes)} bytes")
     global audio_stream, first_audio_time, first_audio_logged, text_start_time
     
+    # 缓存音频数据（无论是否能播放）
+    audio_chunks.append(audio_bytes)
+    logging.info(f"Received audio chunk: {len(audio_bytes)} bytes")
+
+    # 尝试播放音频
     if audio_stream is not None:
         try:
             audio_stream.write(audio_bytes)
         except Exception as exc:
             logging.error(f"PyAudio playback error: {exc}")
-    
-    audio_chunks.append(audio_bytes)
-    logging.info(f"Received audio chunk: {len(audio_bytes)} bytes")
+            # 即使播放失败也要继续缓存数据
 
     # 记录首次音频到达时间并计算首包延迟
     if not first_audio_logged and text_start_time is not None:
         first_audio_time = time.time()
         latency = (first_audio_time - text_start_time) * 1000  # 毫秒
         logging.info(f"[METRIC] Time to first audio: {latency:.2f} ms")
-        first_audio_logged = True
 
 def save_audio_to_file(filename: str = "qwen_tts_output.wav", sample_rate: int = 24000) -> bool:
     """保存音频数据到文件"""
@@ -141,6 +144,11 @@ async def text_to_speech_producer(client: TTSRealtimeClient):
     
     while True:
         try:
+            # 检查客户端连接状态
+            if not client.connect():
+                print("⚠️ TTS连接已断开，停止发送文本")
+                break
+                
             # 使用非阻塞方式获取队列内容
             text = text_queue.get(timeout=30)  # 增加超时时间
             if text is None:
@@ -157,87 +165,104 @@ async def text_to_speech_producer(client: TTSRealtimeClient):
                 await asyncio.sleep(0.05)
         except Exception as e:
             print(f"⚠️ TTS生产者异常: {e}")
+            # 检查是否是连接问题，如果是则退出循环
+            if "keepalive ping timeout" in str(e) or "connection closed" in str(e).lower():
+                break
             # 不立即退出，继续等待可能的文本
             await asyncio.sleep(0.1)
             # 如果长时间没有新文本，可以考虑退出
             continue
     
     print(f"🎧 TTS生产者已完成，共处理 {text_count} 段文本")
+
 async def run_integration_demo(prompt: str = None):
     """运行集成演示：文本生成 + TTS"""
     global audio_stream, text_start_time, first_audio_logged, audio_chunks
-    
-    # 初始化音频流
-    audio_stream = audio_pyaudio.open(
-        format=AUDIO_FORMAT,
-        channels=AUDIO_CHANNELS,
-        rate=AUDIO_SAMPLE_RATE,
-        output=True,
-        frames_per_buffer=AUDIO_BUFFER_SIZE
-    )
+    try:
+        # 初始化音频流
+        try:
+            audio_stream = audio_pyaudio.open(
+                format=AUDIO_FORMAT,
+                channels=AUDIO_CHANNELS,
+                rate=AUDIO_SAMPLE_RATE,
+                output=True,
+                frames_per_buffer=AUDIO_BUFFER_SIZE
+            )
+        except Exception as e:
+            print(f"⚠️ 音频设备初始化失败: {e}")
+            # 可以选择继续运行但不播放音频，或使用虚拟设备
+            audio_stream = None
 
-    # 初始化TTS客户端
-    tts_client = TTSRealtimeClient(
-        base_url=TTS_URL,
-        api_key=API_KEY,
-        voice="Cherry",
-        language_type="Chinese",
-        mode=SessionMode.SERVER_COMMIT,
-        audio_callback=audio_callback
-    )
+        # 初始化TTS客户端
+        tts_client = TTSRealtimeClient(
+            base_url=TTS_URL,
+            api_key=API_KEY,
+            voice="Cherry",
+            language_type="Chinese",
+            mode=SessionMode.SERVER_COMMIT,
+            audio_callback=audio_callback
+        )
 
-    session_start = time.time()
-    
-    # 连接到TTS服务
-    print("🔌 正在连接到TTS服务...")
-    await tts_client.connect()
-    print("✅ TTS服务连接成功")
-    
-    # 启动消息处理任务
-    consumer_task = asyncio.create_task(tts_client.handle_messages())
-    
-    # 获取用户输入
-    if prompt is None:
-        prompt = input("💬 请输入您的问题: ")
-    
-    print(f"🤔 正在处理问题: {prompt}")
-    
-    # 启动文本生成和TTS任务
-    text_generation_task = asyncio.create_task(generate_text(prompt))
-    tts_producer_task = asyncio.create_task(text_to_speech_producer(tts_client))
-    
-    # 等待所有任务完成
-    await asyncio.gather(text_generation_task, tts_producer_task, return_exceptions=True)
-    
-    # 等待一段时间确保所有音频播放完毕
-    print("⏳ 等待音频播放完成...")
-    await asyncio.sleep(3)
-    
-    # 关闭连接
-    await tts_client.close()
-    consumer_task.cancel()
-    
-    # 清理音频资源
-    if audio_stream is not None:
-        audio_stream.stop_stream()
-        audio_stream.close()
-    audio_pyaudio.terminate()
+        session_start = time.time()
 
-    total_time = (time.time() - session_start) * 1000  # 毫秒
-    logging.info(f"[METRIC] Total session time: {total_time:.2f} ms")
+        # 连接到TTS服务
+        print("🔌 正在连接到TTS服务...")
+        await tts_client.connect()
+        print("✅ TTS服务连接成功")
 
-    if not first_audio_logged and text_start_time is not None:
-        logging.warning("[METRIC] No audio received at all!")
+        # 启动消息处理任务
+        consumer_task = asyncio.create_task(tts_client.handle_messages())
 
-    # 保存音频文件
-    os.makedirs("outputs", exist_ok=True)
-    save_audio_to_file(os.path.join("outputs", "qwen_tts_integration_output.wav"))
+        # 稍微等待确保连接建立
+        await asyncio.sleep(0.1)
 
-    # 重置全局状态
-    global audio_chunks
-    audio_chunks = []
-    first_audio_logged = False
-    text_start_time = None
+        # 获取用户输入
+        if prompt is None:
+            prompt = input("💬 请输入您的问题: ")
+
+        print(f"🤔 正在处理问题: {prompt}")
+
+        # 启动文本生成和TTS任务
+        text_generation_task = asyncio.create_task(generate_text(prompt))
+        tts_producer_task = asyncio.create_task(text_to_speech_producer(tts_client))
+
+        # 等待所有任务完成
+        await asyncio.gather(text_generation_task, tts_producer_task, return_exceptions=True)
+
+        # 等待一段时间确保所有音频播放完毕
+        print("⏳ 等待音频播放完成...")
+        await asyncio.sleep(5)
+    
+    except Exception as e:
+        print(f"❌ 运行时错误: {e}")
+    finally:
+        # 确保资源清理
+        if tts_client:
+            await tts_client.close()
+        if 'consumer_task' in locals():
+            consumer_task.cancel()
+
+        # 清理音频资源
+        if audio_stream is not None:
+            audio_stream.stop_stream()
+            audio_stream.close()
+        audio_pyaudio.terminate()
+
+        total_time = (time.time() - session_start) * 1000  # 毫秒
+        logging.info(f"[METRIC] Total session time: {total_time:.2f} ms")
+
+        if not first_audio_logged and text_start_time is not None:
+            logging.warning("[METRIC] No audio received at all!")
+
+        # 保存音频文件
+        os.makedirs("outputs", exist_ok=True)
+        save_audio_to_file(os.path.join("outputs", "qwen_tts_integration_output.wav"))
+
+        # 重置全局状态
+        global audio_chunks
+        audio_chunks = []
+        first_audio_logged = False
+        text_start_time = None
 
 def interactive_mode():
     """交互式模式"""

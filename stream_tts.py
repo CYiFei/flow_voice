@@ -75,6 +75,7 @@ async def _produce_text(client: TTSRealtimeClient):
         "不论是开发者还是业务人员，都能深入参与大模型应用的设计和构建。",
         "您可以通过简单的界面操作，在5分钟内开发出一款大模型应用，",
         "或在几小时内训练出一个专属模型，从而将更多精力专注于应用创新。",
+        "模型训练和应用构建，只需几步，即可实现高效、精准的模型应用。"
     ]
 
     logging.info("Sending text fragments…")
@@ -94,7 +95,7 @@ async def _run_demo():
         channels=1,
         rate=_AUDIO_SAMPLE_RATE,
         output=True,
-        frames_per_buffer=1024
+        frames_per_buffer=2048
     )
 
     client = TTSRealtimeClient(

@@ -30,20 +30,21 @@ AUDIO_BUFFER_SIZE = 2048
 
 # 全局变量
 audio_chunks = []
-audio_pyaudio = pyaudio.PyAudio()
+audio_pyaudio = None
 audio_stream = None
 text_queue = Queue()
 is_playing = False
 
 # 时间统计变量
 text_start_time = None
+first_token_time = None  # 新增：记录第一个token生成时间
 first_audio_time = None
 first_audio_logged = False
 
 def audio_callback(audio_bytes: bytes):
     """TTS音频回调函数：实时播放并缓存音频数据"""
     print(f"DEBUG: Audio callback triggered with {len(audio_bytes)} bytes")
-    global audio_stream, first_audio_time, first_audio_logged, text_start_time
+    global audio_stream, first_audio_time, first_audio_logged, text_start_time, first_token_time
     
     # 缓存音频数据（无论是否能播放）
     audio_chunks.append(audio_bytes)
@@ -62,6 +63,13 @@ def audio_callback(audio_bytes: bytes):
         first_audio_time = time.time()
         latency = (first_audio_time - text_start_time) * 1000  # 毫秒
         logging.info(f"[METRIC] Time to first audio: {latency:.2f} ms")
+        
+        # 如果已经记录了第一个token的时间，则计算token到音频播放的时间间隔
+        if first_token_time is not None:
+            token_to_audio_latency = (first_audio_time - first_token_time) * 1000  # 毫秒
+            logging.info(f"[METRIC] Time from first token to first audio: {token_to_audio_latency:.2f} ms")
+        
+        first_audio_logged = True
 
 def save_audio_to_file(filename: str = "qwen_tts_output.wav", sample_rate: int = 24000) -> bool:
     """保存音频数据到文件"""
@@ -81,9 +89,12 @@ def save_audio_to_file(filename: str = "qwen_tts_output.wav", sample_rate: int =
         logging.error(f"Failed to save audio: {exc}")
         return False
 
+
+
+
 async def generate_text(prompt: str):
     """使用Qwen3-Max模型流式生成文本"""
-    global text_start_time
+    global text_start_time, first_token_time
 
     # 显式设置API密钥
     import dashscope
@@ -112,6 +123,12 @@ async def generate_text(prompt: str):
             if chunk.status_code == 200:
                 content = chunk.output.choices[0].message.content
                 if content:
+                    # 记录第一个token的时间
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                        latency = (first_token_time - text_start_time) * 1000  # 毫秒
+                        logging.info(f"[METRIC] Time to first token: {latency:.2f} ms")
+                    
                     full_response += content
                     # 实时打印输出
                     print(content, end="", flush=True)
@@ -137,6 +154,8 @@ async def generate_text(prompt: str):
         logging.error(f"Text generation error: {e}")
         text_queue.put(None)  # 确保发送结束标记
 
+
+# 替换 text_to_speech_producer 函数中的代码
 async def text_to_speech_producer(client: TTSRealtimeClient):
     """从文本队列中获取文本并发送给TTS客户端"""
     print("🎧 TTS生产者已启动")
@@ -144,11 +163,6 @@ async def text_to_speech_producer(client: TTSRealtimeClient):
     
     while True:
         try:
-            # 检查客户端连接状态
-            if not client.connect():
-                print("⚠️ TTS连接已断开，停止发送文本")
-                break
-                
             # 使用非阻塞方式获取队列内容
             text = text_queue.get(timeout=30)  # 增加超时时间
             if text is None:
@@ -174,10 +188,21 @@ async def text_to_speech_producer(client: TTSRealtimeClient):
             continue
     
     print(f"🎧 TTS生产者已完成，共处理 {text_count} 段文本")
-
+    
+    
 async def run_integration_demo(prompt: str = None):
     """运行集成演示：文本生成 + TTS"""
-    global audio_stream, text_start_time, first_audio_logged, audio_chunks
+    global audio_stream, text_start_time, first_audio_logged, audio_chunks, audio_pyaudio
+    # 重置全局状态
+    audio_chunks = []
+    first_audio_logged = False
+    text_start_time = None
+    
+    # 重新初始化 PyAudio
+    if audio_pyaudio is not None:
+        audio_pyaudio.terminate()
+    audio_pyaudio = pyaudio.PyAudio()
+    
     try:
         # 初始化音频流
         try:
@@ -237,7 +262,7 @@ async def run_integration_demo(prompt: str = None):
         print(f"❌ 运行时错误: {e}")
     finally:
         # 确保资源清理
-        if tts_client:
+        if 'tts_client' in locals():
             await tts_client.close()
         if 'consumer_task' in locals():
             consumer_task.cancel()
@@ -246,7 +271,8 @@ async def run_integration_demo(prompt: str = None):
         if audio_stream is not None:
             audio_stream.stop_stream()
             audio_stream.close()
-        audio_pyaudio.terminate()
+        if audio_pyaudio is not None:
+            audio_pyaudio.terminate()
 
         total_time = (time.time() - session_start) * 1000  # 毫秒
         logging.info(f"[METRIC] Total session time: {total_time:.2f} ms")
@@ -257,12 +283,6 @@ async def run_integration_demo(prompt: str = None):
         # 保存音频文件
         os.makedirs("outputs", exist_ok=True)
         save_audio_to_file(os.path.join("outputs", "qwen_tts_integration_output.wav"))
-
-        # 重置全局状态
-        global audio_chunks
-        audio_chunks = []
-        first_audio_logged = False
-        text_start_time = None
 
 def interactive_mode():
     """交互式模式"""
@@ -297,7 +317,7 @@ def interactive_mode():
 def main():
     # 配置日志（减少干扰）
     logging.basicConfig(
-        level=logging.WARNING,  # 只显示警告及以上级别日志
+        level=logging.INFO,  # 只显示警告及以上级别日志
         format='%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )

@@ -38,6 +38,7 @@ is_playing = False
 # 时间统计变量
 text_start_time = None
 first_token_time = None  # 新增：记录第一个token生成时间
+last_token_time = None  # 新增：记录上一个token的时间
 first_audio_time = None
 first_audio_logged = False
 
@@ -94,7 +95,7 @@ def save_audio_to_file(filename: str = "qwen_tts_output.wav", sample_rate: int =
 
 async def generate_text(prompt: str):
     """使用Qwen3-Max模型流式生成文本"""
-    global text_start_time, first_token_time
+    global text_start_time, first_token_time, last_token_time
 
     # 显式设置API密钥
     import dashscope
@@ -123,11 +124,20 @@ async def generate_text(prompt: str):
             if chunk.status_code == 200:
                 content = chunk.output.choices[0].message.content
                 if content:
+                    current_time = time.time()
+                    
                     # 记录第一个token的时间
                     if first_token_time is None:
-                        first_token_time = time.time()
+                        first_token_time = current_time
                         latency = (first_token_time - text_start_time) * 1000  # 毫秒
                         logging.info(f"[METRIC] Time to first token: {latency:.2f} ms")
+                    # 记录后续token的时间间隔
+                    elif last_token_time is not None:
+                        token_interval = (current_time - last_token_time) * 1000  # 毫秒
+                        logging.info(f"[METRIC] Time since last token: {token_interval:.2f} ms")
+                    
+                    # 更新上一个token的时间
+                    last_token_time = current_time
                     
                     full_response += content
                     # 实时打印输出

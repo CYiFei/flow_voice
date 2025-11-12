@@ -71,15 +71,30 @@ def _save_audio_to_file(filename: str = "output.wav", sample_rate: int = 24000) 
 async def _produce_text(client: TTSRealtimeClient):
     global _text_start_time
     text_fragments = [
-        "阿里云的大模型服务平台百炼是",
-        "一站式的大模型开发及应用构建平台。",
+        "阿",
+        "里",
+        "云",
+        "的",
+        "大",
+        "模",
+        "型",
+        "服",
+        "务",
+        "平",
+        "台",
+        "百",
+        "炼,",
+        "是",
+        "一站式的大模型开",
+        "发及应用构建平台。",
         "不论是开发者还是业务人员，都能深入参与",
         "大模型应用的设计和构建。"
         "您可以通过简",
         "单的界面操作，在5分钟内开发出一款大模型应用，",
         "或在几小时内训练出一个专",
         "属模型，从而将更多精力专注于应用创新。"
-        "模型训练和应用构建，只需几步，即可实现高效、精准的模型应用。"
+        "模型训练和应用构",
+        "建，只需几步，即可实现高效、精准的模型应用。"
     ]
 
     logging.info("Sending text fragments…")
@@ -99,7 +114,7 @@ async def _run_demo():
         channels=1,
         rate=_AUDIO_SAMPLE_RATE,
         output=True,
-        frames_per_buffer=2048
+        frames_per_buffer=1024
     )
 
     client = TTSRealtimeClient(
